@@ -10,29 +10,6 @@ from boundary_org import BoundaryEnhancementModule
 import cv2
 import os
 
-def save_heatmap(feature, save_path, prefix, alpha=0.5):
-    """
-    生成并保存热力图
-    参数：
-        feature: 输入特征图 (H, W)
-        save_path: 保存路径
-        prefix: 文件名前缀
-        alpha: 透明度
-    """
-    # 转换为numpy并归一化
-    heatmap = feature.cpu().detach().numpy()
-    heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
-    heatmap = np.uint8(255 * heatmap)
-    
-    # 应用JET颜色映射
-    heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    
-    # 创建保存目录
-    os.makedirs(save_path, exist_ok=True)
-    
-    # 保存热力图
-    cv2.imwrite(os.path.join(save_path, f"{prefix}_heatmap.png"), heatmap_colored)
-
 def weight_init(module):
     for n, m in module.named_children():
         if isinstance(m, nn.Conv2d):
@@ -55,9 +32,7 @@ class Bottleneck(nn.Module):
         super(Bottleneck, self).__init__()
         self.conv1      = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn1        = nn.BatchNorm2d(planes)
-        #self.conv2      = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=(3*dilation-1)//2, bias=False, dilation=dilation)#padding===1 所以用下面的替换
-        self.conv2      = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=(3*dilation-1)//2, bias=False, dilation=dilation)#padding===1
-        
+        self.conv2      = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=(3*dilation-1)//2, bias=False, dilation=dilation)
         self.bn2        = nn.BatchNorm2d(planes)
         self.conv3      = nn.Conv2d(planes, planes*4, kernel_size=1, bias=False)
         self.bn3        = nn.BatchNorm2d(planes*4)
@@ -86,8 +61,6 @@ class ResNet(nn.Module):
 
     def make_layer(self, planes, blocks, stride, dilation):
         downsample = None
-        #if stride != 1 or self.inplanes != planes*4: #这里的if条件判断永远成立，可删减
-            #downsample = nn.Sequential(nn.Conv2d(self.inplanes, planes*4, kernel_size=1, stride=stride, bias=False), nn.BatchNorm2d(planes*4))#实际下采样执行代码
         downsample = nn.Sequential(nn.Conv2d(self.inplanes, planes*4, kernel_size=1, stride=stride, bias=False), nn.BatchNorm2d(planes*4))#实际下采样执行代码
         layers = [Bottleneck(self.inplanes, planes, stride, downsample, dilation=dilation)] #Bottleneck的初始化，这个代码dilation=1，结合前后可删减
         self.inplanes = planes*4
@@ -125,9 +98,6 @@ class CA(nn.Module):
         down = torch.sigmoid(self.conv2(down))
         return left * down  #对应通道所有空间位置相乘（广播机制），实现通道注意力机制。
 
-    def initialize(self):
-        weight_init(self)
-
 # 特征增强模块，扩大out1(256)到out2(512),然后再拆分，前256是w，后256是b，残差相加。
 """ Self Refinement Module """
 class SRM(nn.Module):
@@ -143,16 +113,10 @@ class SRM(nn.Module):
         w, b = out2[:, :256, :, :], out2[:, 256:, :, :]
         return F.relu(w * out1 + b, inplace=True)
 
-
-    def initialize(self):
-        weight_init(self)
-
-
 """ Feature Interweaved Aggregation Module """
 class FAM(nn.Module):
     def __init__(self, in_channel_left, in_channel_down, in_channel_right):
         super(FAM, self).__init__()
-        #self.conv0 = nn.Conv2d(in_channel_left, 256, kernel_size=1, stride=1, padding=0)
         self.conv0 = nn.Conv2d(in_channel_left, 256, kernel_size=3, stride=1, padding=1)
         self.bn0   = nn.BatchNorm2d(256)
         self.conv1 = nn.Conv2d(in_channel_down, 256, kernel_size=3, stride=1, padding=1)
@@ -202,9 +166,6 @@ class FAM(nn.Module):
 
         return F.relu(self.bn3(self.conv3(out)), inplace=True)
 
-    def initialize(self):
-        weight_init(self)
-
 #自注意力模块： 对于in_channel_down这张512通道的特征图，被分成了256权重和256偏置，最终的通道数与in_channel_left一致是256
 class SA(nn.Module):
     def __init__(self, in_channel_left, in_channel_down):
@@ -221,9 +182,6 @@ class SA(nn.Module):
         w,b = down_1[:,:256,:,:], down_1[:,256:,:,:]
 
         return F.relu(w*left+b, inplace=True)
-
-    def initialize(self):
-        weight_init(self)
         
 class HBNet(nn.Module):
     def __init__(self, cfg):
@@ -261,41 +219,13 @@ class HBNet(nn.Module):
         self.bem4 = BoundaryEnhancementModule(1024,1024)
         
     def forward(self, x, mode=None,save_dir=None, iteration=0):
-        print('Input to HBNet:', x.shape)
-        ## 热力图代码---
-        if save_dir is not None:
-            save_path = os.path.join(save_dir, f"iter_{iteration:04d}")
-            os.makedirs(save_path, exist_ok=True)
-        ## 热力图代码---
-        
+      
         out1, out2, out3, out4, out5_ = self.bkbone(x)
-
-        ## 热力图代码---
-        # 保存Backbone各层热力图
-        if save_dir is not None:
-            save_heatmap(out2.mean(dim=1)[0], save_path, "backbone_out2")  # 取通道均值
-            save_heatmap(out3.mean(dim=1)[0], save_path, "backbone_out3")
-            save_heatmap(out4.mean(dim=1)[0], save_path, "backbone_out4")
-            save_heatmap(out5_.mean(dim=1)[0], save_path, "backbone_out5")
-        ## 热力图代码---
         
-        #___________边界增强______________
-         
-         # # 特征图代码---
-        # 边界增强模块可视化
-        out2 = self.bem2(out2)
-        if save_dir is not None:
-            save_heatmap(out2.mean(dim=1)[0], save_path, "pre_bem2")
-            
-        out3 = self.bem3(out3)
-        if save_dir is not None:
-            save_heatmap(out3.mean(dim=1)[0], save_path, "pre_bem3")
-            
+        out2 = self.bem2(out2)  
+        out3 = self.bem3(out3)   
         out4 = self.bem4(out4)
-        if save_dir is not None:
-            save_heatmap(out4.mean(dim=1)[0], save_path, "pre_bem4")
-        
-        
+   
         # GCF
         out4_a = self.ca45(out5_, out5_)
         out3_a = self.ca35(out5_, out5_)
@@ -306,22 +236,10 @@ class HBNet(nn.Module):
 
         # out 先进入解码器的layer1层再进行W操作
         out5 = self.srm5(out5)
-        if save_dir is not None:
-            save_heatmap(out5.mean(dim=1)[0], save_path, "decoder_out5")
-            
-        out4 = self.srm4(self.fam45(out4, out5, out4_a))
-        if save_dir is not None:
-            save_heatmap(out4.mean(dim=1)[0], save_path, "decoder_out4")
-            
-        out3 = self.srm3(self.fam34(out3, out4, out3_a))
-        if save_dir is not None:
-            save_heatmap(out3.mean(dim=1)[0], save_path, "decoder_out3")
-            
-        out2 = self.srm2(self.fam23(out2, out3, out2_a))
-        if save_dir is not None:
-            save_heatmap(out2.mean(dim=1)[0], save_path, "decoder_out2")
-            
-            
+        out4 = self.srm4(self.fam45(out4, out5, out4_a))   
+        out3 = self.srm3(self.fam34(out3, out4, out3_a))       
+        out2 = self.srm2(self.fam23(out2, out3, out2_a))    
+        
         
         # we use bilinear interpolation instead of transpose convolution
         if mode == 'Test':
