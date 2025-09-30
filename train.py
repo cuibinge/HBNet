@@ -11,7 +11,7 @@ import cv2
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from data import dataset
-from net_agg_bp import SCWSSOD
+from HBNet import HBNet
 import logging as logger
 from lib.data_prefetcher import DataPrefetcher
 from lscloss import *
@@ -19,11 +19,10 @@ import numpy as np
 from tools import *
 import matplotlib.pyplot as plt
 from skimage.util import img_as_ubyte, img_as_float
-# 新增导入
-from DCBP_training import Focal_Loss, CE_Loss, Dice_loss
+from loss import Focal_Loss
 
-TAG = "scwssod"
-SAVE_PATH = "semi_train/general_21_1100_bp_bl0.15"
+TAG = "hbnet"
+SAVE_PATH = "semi_train/ceshi_012_21_1100_bp_bl0.15"
 logger.basicConfig(level=logger.INFO, format='%(levelname)s %(asctime)s %(filename)s: %(lineno)d] %(message)s', datefmt='%Y-%m-%d %H:%M:%S', \
                            filename="train_%s.log"%(TAG), filemode="w")
 
@@ -223,4 +222,4 @@ def train(Dataset, Network):
                 torch.save(net.state_dict(), cfg.savepath+'/semi_new-'+str(epoch+1)+'.pt')
 
 if __name__=='__main__':
-    train(dataset, SCWSSOD)
+    train(dataset, HBNet)
