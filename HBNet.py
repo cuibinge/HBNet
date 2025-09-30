@@ -82,6 +82,80 @@ class ResNet(nn.Module):
     def initialize(self):
         self.load_state_dict(torch.load('resnet50-19c8e357.pth'), strict=False)
 
+# 边缘增强模块：
+class BoundaryEnhancementModule(nn.Module):
+    def __init__(self, in_channels, out_channels=None):
+        super(BoundaryEnhancementModule, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels or in_channels
+        
+        # 三种可学习的边界检测算子
+        self.learnable_sobel_x = nn.Conv2d(in_channels, in_channels, kernel_size=3, 
+                                          stride=1, padding=1, groups=in_channels, bias=False)
+        self.learnable_sobel_y = nn.Conv2d(in_channels, in_channels, kernel_size=3, 
+                                          stride=1, padding=1, groups=in_channels, bias=False)
+        self.learnable_laplace = nn.Conv2d(in_channels, in_channels, kernel_size=3, 
+                                          stride=1, padding=1, groups=in_channels, bias=False)
+        
+        # 初始化算子权重（保持原有结构）
+        self._init_operators()
+        
+        # 权重学习网络（替代原来的融合方式）
+        self.weight_net = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels * 3, in_channels // 4, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // 4, 3, 1),  # 输出3个权重
+            nn.Softmax(dim=1)
+        )
+        
+        # 输出转换层（保持通道数一致）
+        self.output_conv = nn.Sequential(
+            nn.Conv2d(in_channels, self.out_channels, 3, padding=1),
+            nn.BatchNorm2d(self.out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def _init_operators(self):
+        
+        # Sobel X
+        sobel_x = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]])
+        self.learnable_sobel_x.weight.data = sobel_x.repeat(self.in_channels, 1, 1, 1)
+        self.learnable_sobel_x.weight.requires_grad = True
+        
+        # Sobel Y
+        sobel_y = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]])
+        self.learnable_sobel_y.weight.data = sobel_y.repeat(self.in_channels, 1, 1, 1)
+        self.learnable_sobel_y.weight.requires_grad = True
+        
+        # Laplace
+        laplace = torch.tensor([[0., 1., 0.], [1., -4., 1.], [0., 1., 0.]])
+        self.learnable_laplace.weight.data = laplace.repeat(self.in_channels, 1, 1, 1)
+        self.learnable_laplace.weight.requires_grad = True
+
+    def forward(self, x):
+        # 三种边界检测
+        sobel_x = torch.abs(self.learnable_sobel_x(x))
+        sobel_y = torch.abs(self.learnable_sobel_y(x))
+        laplace = torch.abs(self.learnable_laplace(x))
+        
+        # 拼接特征学习权重
+        features_cat = torch.cat([sobel_x, sobel_y, laplace], dim=1)
+        weights = self.weight_net(features_cat)  # [B, 3, 1, 1]
+        
+        # 加权融合
+        w1, w2, w3 = weights[:, 0:1], weights[:, 1:2], weights[:, 2:3]
+        boundary_enhanced = w1 * sobel_x + w2 * sobel_y + w3 * laplace
+        
+        # 残差连接 + 输出转换
+        output = x + boundary_enhanced  # 残差连接
+        output = self.output_conv(output)
+        
+        return output
+
+    def initialize(self):
+        weight_init(self)
+
 # 通道注意力模块：
 class CA(nn.Module):
     def __init__(self, in_channel_left, in_channel_down):
@@ -212,11 +286,12 @@ class HBNet(nn.Module):
         self.linear2 = nn.Conv2d(256, 1, kernel_size=3, stride=1, padding=1)
         self.initialize()
          
-#self.PAM_Module = RW_Module(256, 2)
-#wang：RW_Module是自注意力模块
         self.bem2 = BoundaryEnhancementModule(256,256)
         self.bem3 = BoundaryEnhancementModule(512,512)
         self.bem4 = BoundaryEnhancementModule(1024,1024)
+
+        # 2类：边界/非边界
+        self.boundary_head = nn.Conv2d(256, 2, kernel_size=1)
         
     def forward(self, x, mode=None,save_dir=None, iteration=0):
       
@@ -240,7 +315,7 @@ class HBNet(nn.Module):
         out3 = self.srm3(self.fam34(out3, out4, out3_a))       
         out2 = self.srm2(self.fam23(out2, out3, out2_a))    
         
-        
+        boundary_output = self.boundary_head(out2)
         # we use bilinear interpolation instead of transpose convolution
         if mode == 'Test':
             # ------------------------------------------------------ TEST ----------------------------------------------------
@@ -256,7 +331,7 @@ class HBNet(nn.Module):
             out2 = F.interpolate(self.linear2(out2), size=x.size()[2:], mode='bilinear', align_corners=False)
             if save_dir is not None:
                 save_heatmap(out2[0,0], save_path, "final_output2")
-            return out2, out3, out4, out5
+            return out2, out3, out4, out5, boundary_output
         else:
             # ------------------------------------------------------ TRAIN ----------------------------------------------------
             out2_no_sig  = F.interpolate(self.linear2(out2), size=x.size()[2:], mode='bilinear', align_corners=False)
@@ -270,6 +345,6 @@ class HBNet(nn.Module):
             out3 = torch.cat((1 - out3, out3), 1)
             out2 = torch.cat((1 - out2, out2), 1)
             
-            return out2, out3, out4, out5,out2_no_sig
+            return out2, out3, out4, out5,out2_no_sig, boundary_output
     def initialize(self):
         weight_init(self)
